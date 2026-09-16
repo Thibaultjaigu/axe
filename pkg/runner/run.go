@@ -373,12 +373,19 @@ func Run(ctx context.Context, opts Options) (*Result, error) {
 		messages = []provider.Message{{Role: "user", Content: userMessage}}
 	}
 
+	// cacheEnabled defaults to true; agent TOML can opt out via params.cache_enabled.
+	cacheEnabled := true
+	if cfg.Params.CacheEnabled != nil {
+		cacheEnabled = *cfg.Params.CacheEnabled
+	}
+
 	req := &provider.Request{
 		Model:       modelName,
 		System:      systemPrompt,
 		Messages:    messages,
 		Temperature: cfg.Params.Temperature,
 		MaxTokens:   cfg.Params.MaxTokens,
+		CacheConfig: cacheEnabled,
 	}
 
 	if cfg.Params.ResponseFormat.IsSet() {
@@ -497,7 +504,7 @@ func Run(ctx context.Context, opts Options) (*Result, error) {
 
 	// Step 18: Run execution
 	var resp *provider.Response
-	var totalInputTokens, totalOutputTokens, totalToolCalls int
+	var totalInputTokens, totalOutputTokens, totalCacheReadTokens, totalCacheWriteTokens, totalToolCalls int
 	var allToolCallDetails []ToolCallDetail
 	var streamedText bool
 
@@ -544,6 +551,8 @@ func Run(ctx context.Context, opts Options) (*Result, error) {
 		})
 		totalInputTokens = resp.InputTokens
 		totalOutputTokens = resp.OutputTokens
+		totalCacheReadTokens = resp.CacheReadTokens
+		totalCacheWriteTokens = resp.CacheWriteTokens
 		tracker.Add(resp.InputTokens, resp.OutputTokens)
 
 		if tracker.Exceeded() {
@@ -554,6 +563,7 @@ func Run(ctx context.Context, opts Options) (*Result, error) {
 			_, _ = fmt.Fprintf(stderr, "Duration: %dms\n", time.Since(start).Milliseconds())
 			if tracker.Max() > 0 {
 				_, _ = fmt.Fprintf(stderr, "Tokens:   %d input, %d output (cumulative, budget: %d/%d)\n", resp.InputTokens, resp.OutputTokens, tracker.Used(), tracker.Max())
+				_, _ = fmt.Fprintf(stderr, "Cache:    %d read, %d written\n", resp.CacheReadTokens, resp.CacheWriteTokens)
 			} else {
 				_, _ = fmt.Fprintf(stderr, "Tokens:   %d input, %d output\n", resp.InputTokens, resp.OutputTokens)
 			}
@@ -596,6 +606,8 @@ func Run(ctx context.Context, opts Options) (*Result, error) {
 
 			totalInputTokens += resp.InputTokens
 			totalOutputTokens += resp.OutputTokens
+			totalCacheReadTokens += resp.CacheReadTokens
+			totalCacheWriteTokens += resp.CacheWriteTokens
 			tracker.Add(resp.InputTokens, resp.OutputTokens)
 
 			if opts.Verbose {
@@ -679,6 +691,7 @@ func Run(ctx context.Context, opts Options) (*Result, error) {
 			_, _ = fmt.Fprintf(stderr, "Duration: %dms\n", time.Since(start).Milliseconds())
 			if tracker.Max() > 0 {
 				_, _ = fmt.Fprintf(stderr, "Tokens:   %d input, %d output (cumulative, budget: %d/%d)\n", totalInputTokens, totalOutputTokens, tracker.Used(), tracker.Max())
+				_, _ = fmt.Fprintf(stderr, "Cache:    %d read, %d written\n", totalCacheReadTokens, totalCacheWriteTokens)
 			} else {
 				_, _ = fmt.Fprintf(stderr, "Tokens:   %d input, %d output (cumulative)\n", totalInputTokens, totalOutputTokens)
 			}
@@ -690,18 +703,20 @@ func Run(ctx context.Context, opts Options) (*Result, error) {
 
 	// Build result
 	result := &Result{
-		Content:         resp.Content,
-		Model:           resp.Model,
-		InputTokens:     totalInputTokens,
-		OutputTokens:    totalOutputTokens,
-		Cost:            resp.Cost,
-		StopReason:      resp.StopReason,
-		CacheStatus:     resp.CacheStatus,
-		ToolCalls:       totalToolCalls,
-		ToolCallDetails: allToolCallDetails,
-		DurationMs:      durationMs,
-		Refused:         refusal.Detect(resp.Content),
-		RetryAttempts:   retryProv.Attempts(),
+		Content:          resp.Content,
+		Model:            resp.Model,
+		InputTokens:      totalInputTokens,
+		OutputTokens:     totalOutputTokens,
+		Cost:             resp.Cost,
+		StopReason:       resp.StopReason,
+		CacheStatus:      resp.CacheStatus,
+		CacheReadTokens:  totalCacheReadTokens,
+		CacheWriteTokens: totalCacheWriteTokens,
+		ToolCalls:        totalToolCalls,
+		ToolCallDetails:  allToolCallDetails,
+		DurationMs:       durationMs,
+		Refused:          refusal.Detect(resp.Content),
+		RetryAttempts:    retryProv.Attempts(),
 		Budget: BudgetState{
 			Max:      tracker.Max(),
 			Used:     tracker.Used(),
@@ -774,6 +789,7 @@ func drainEventStream(stream *provider.EventStream, w io.Writer) (*provider.Resp
 	var content strings.Builder
 	var toolCalls []provider.ToolCall
 	var inputTokens, outputTokens int
+	var cacheReadTokens, cacheWriteTokens int
 	var cost float64
 	var stopReason string
 	var cacheStatus string
@@ -839,17 +855,21 @@ func drainEventStream(stream *provider.EventStream, w io.Writer) (*provider.Resp
 			cost = ev.Cost
 			stopReason = ev.StopReason
 			cacheStatus = ev.CacheStatus
+			cacheReadTokens = ev.CacheReadTokens
+			cacheWriteTokens = ev.CacheWriteTokens
 		}
 	}
 
 	return &provider.Response{
-		Content:      content.String(),
-		ToolCalls:    toolCalls,
-		InputTokens:  inputTokens,
-		OutputTokens: outputTokens,
-		Cost:         cost,
-		StopReason:   stopReason,
-		CacheStatus:  cacheStatus,
+		Content:          content.String(),
+		ToolCalls:        toolCalls,
+		InputTokens:      inputTokens,
+		OutputTokens:     outputTokens,
+		CacheReadTokens:  cacheReadTokens,
+		CacheWriteTokens: cacheWriteTokens,
+		Cost:             cost,
+		StopReason:       stopReason,
+		CacheStatus:      cacheStatus,
 	}, nil
 }
 
